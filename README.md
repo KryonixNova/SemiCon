@@ -1,6 +1,5 @@
 
 # SemiCon
-Competition
 # DRAM Synthetic SEM + Reference/Search Localization Benchmark
 
 This project has two layers:
