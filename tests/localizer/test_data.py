@@ -147,6 +147,40 @@ def test_sample_pair_shapes_and_ground_truth_in_range():
     assert 50.0 <= s["gt_y"] <= 950.0
 
 
+def test_geometric_profiles_normal_is_a_noop():
+    a = sample_pair(generate_canvas_bundle(5), 5, 0, geometric_profile="normal")
+    b = sample_pair(generate_canvas_bundle(5), 5, 0)  # default is also "normal"
+    assert torch.equal(a["reference_img"], b["reference_img"])
+    assert a["scale_ratio"] == 1.0
+    assert a["rotation_deg"] == 0.0
+
+
+def test_drift_profile_perturbs_reference_but_not_ground_truth():
+    normal = sample_pair(generate_canvas_bundle(5), 5, 0, geometric_profile="normal")
+    drift = sample_pair(generate_canvas_bundle(5), 5, 0, geometric_profile="drift")
+    assert not torch.equal(normal["reference_img"], drift["reference_img"])
+    assert normal["gt_x"] == drift["gt_x"]
+    assert normal["gt_y"] == drift["gt_y"]
+    assert normal["reference_img"].shape == drift["reference_img"].shape
+
+
+def test_drift_profile_scale_and_rotation_stay_within_declared_range():
+    scales, rotations = [], []
+    for k in range(20):
+        s = sample_pair(generate_canvas_bundle(5), 5, k, geometric_profile="drift")
+        scales.append(s["scale_ratio"])
+        rotations.append(s["rotation_deg"])
+    assert all(0.9 <= v <= 1.1 for v in scales)
+    assert all(-2.0 <= v <= 2.0 for v in rotations)
+    assert len(set(scales)) > 1, "scale_ratio should vary across crops, not be constant"
+
+
+def test_sample_pair_includes_raw_uint8_reference():
+    s = sample_pair(generate_canvas_bundle(0), 0, 0)
+    assert s["reference_img_u8"].dtype == np.uint8
+    assert s["reference_img_u8"].shape == (100, 100)
+
+
 def test_same_seed_reproduces_identical_sample():
     a = sample_pair(generate_canvas_bundle(3), 3, 5)
     b = sample_pair(generate_canvas_bundle(3), 3, 5)
@@ -172,6 +206,15 @@ def test_zero_jitter_profile_produces_a_different_canvas():
     a = generate_canvas_bundle(11, jitter_profile="normal")["search_img"]
     b = generate_canvas_bundle(11, jitter_profile="zero")["search_img"]
     assert not torch.equal(torch.as_tensor(a), torch.as_tensor(b))
+
+
+def test_dataset_geometric_profile_changes_reference_content():
+    cfg = LocalizerConfig(crops_per_canvas=1, val_seed_lo=0, val_seed_hi=1)
+    normal_item = next(iter(LocalizerDataset(
+        "val", cfg, geometric_profile="normal", shuffle_buffer_size=1)))
+    drift_item = next(iter(LocalizerDataset(
+        "val", cfg, geometric_profile="drift", shuffle_buffer_size=1)))
+    assert not torch.equal(normal_item["reference_img"], drift_item["reference_img"])
 
 
 def test_dataset_yields_batchable_items():

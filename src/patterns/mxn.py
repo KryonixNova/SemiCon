@@ -35,10 +35,17 @@ def fixed_count_spans(size_px: int, count: int, strip_width_nm: float):
 
 
 def generate_mxn_canvas(
-    size_px: int, m: int, n: int, strip_width_nm: float, rng: np.random.Generator
+    size_px: int, m: int, n: int, strip_width_nm: float, rng: np.random.Generator,
+    linewidth_bias_nm: float = 0.0, corner_rounding_px: float = 0.0,
 ) -> dict:
     """Tile an m (rows) x n (cols) grid of independent DRAM mats, each with
     its own randomly chosen preset, separated by routing-strip material.
+
+    `linewidth_bias_nm`/`corner_rounding_px` are passed straight through to
+    every mat's `generate_dram_canvas` call -- the same CD-bias/corner-
+    rounding distortion the single-architecture pipeline (src/pipeline.py)
+    already supports, just applied uniformly across every region of this
+    m x n grid.
     """
     presets = presets_for_kind("dram")
     canvas = _strip_routing_texture(size_px, rng)
@@ -54,7 +61,9 @@ def generate_mxn_canvas(
                 preset = presets[int(rng.integers(0, len(presets)))]
                 child_rng = np.random.default_rng(rng.integers(0, 2**31 - 1))
                 mat_canvas = generate_dram_canvas(
-                    max(mat_h, mat_w), preset, 0.0, child_rng
+                    max(mat_h, mat_w), preset, 0.0, child_rng,
+                    linewidth_bias_nm=linewidth_bias_nm,
+                    corner_rounding_px=corner_rounding_px,
                 )
                 canvas[y0:y1, x0:x1] = mat_canvas[:mat_h, :mat_w]
                 mat_rects.append((x0, y0, mat_w, mat_h))

@@ -20,6 +20,10 @@ notice by eye:
 
 from __future__ import annotations
 
+import subprocess
+import sys as _sys
+from pathlib import Path
+
 import pytest
 import torch
 
@@ -27,6 +31,8 @@ from src.localizer.config import LocalizerConfig
 from src.localizer.losses import focal_heatmap_loss, offset_loss
 from src.localizer.model import DriftSenseLocalizer
 from src.localizer.targets import build_targets
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.mark.slow
@@ -93,3 +99,61 @@ def test_a_few_optimizer_steps_stay_finite_and_do_not_collapse():
     assert not all_identical, (
         "predictions collapsed to an identical (x, y) for different inputs"
     )
+
+
+def _run_train(tmp_path, extra_args):
+    cmd = [_sys.executable, "scripts/train.py", "--run-name", "geo_test",
+           "--out-dir", str(tmp_path), "--max-steps", "4", "--steps-this-run", "2",
+           "--val-every", "2", "--val-batches", "1", "--num-workers", "0"] + extra_args
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO_ROOT)
+    return result
+
+
+@pytest.mark.slow
+def test_geometric_profile_persisted_and_resets_best_acc_on_change(tmp_path):
+    import torch as _torch
+
+    r1 = _run_train(tmp_path, ["--geometric-profile", "normal"])
+    assert r1.returncode == 0, r1.stderr
+    ckpt1 = _torch.load(tmp_path / "geo_test" / "last.pt", weights_only=False)
+    assert ckpt1["geometric_profile"] == "normal"
+
+    r2 = _run_train(tmp_path, ["--geometric-profile", "drift", "--resume"])
+    assert r2.returncode == 0, r2.stderr
+    assert "NOTE: profile changed" in r2.stdout
+    ckpt2 = _torch.load(tmp_path / "geo_test" / "last.pt", weights_only=False)
+    assert ckpt2["geometric_profile"] == "drift"
+
+
+@pytest.mark.slow
+def test_init_from_warm_starts_weights_but_resets_step_and_schedule(tmp_path):
+    import torch as _torch
+
+    src_cmd = [_sys.executable, "scripts/train.py", "--run-name", "init_src",
+               "--out-dir", str(tmp_path), "--max-steps", "4", "--steps-this-run", "4",
+               "--val-every", "2", "--val-batches", "1", "--num-workers", "0"]
+    src_result = subprocess.run(src_cmd, capture_output=True, text=True, cwd=REPO_ROOT)
+    assert src_result.returncode == 0, src_result.stderr
+    src_ckpt_path = tmp_path / "init_src" / "best.pt"
+    assert src_ckpt_path.exists()
+
+    dst_cmd = [_sys.executable, "scripts/train.py", "--run-name", "init_dst",
+               "--out-dir", str(tmp_path), "--max-steps", "2", "--steps-this-run", "2",
+               "--val-every", "2", "--val-batches", "1", "--num-workers", "0",
+               "--init-from", str(src_ckpt_path)]
+    dst_result = subprocess.run(dst_cmd, capture_output=True, text=True, cwd=REPO_ROOT)
+    assert dst_result.returncode == 0, dst_result.stderr
+    assert "initialized weights from" in dst_result.stdout
+
+    dst_ckpt = _torch.load(tmp_path / "init_dst" / "last.pt", weights_only=False)
+    assert dst_ckpt["step"] == 2
+    assert dst_ckpt["best_acc"] >= -1.0
+
+
+def test_resume_and_init_from_together_is_rejected(tmp_path):
+    cmd = [_sys.executable, "scripts/train.py", "--run-name", "conflict_test",
+           "--out-dir", str(tmp_path), "--max-steps", "2", "--resume",
+           "--init-from", "checkpoints/production_v2/best.pt"]
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO_ROOT)
+    assert result.returncode != 0
+    assert "mutually exclusive" in (result.stdout + result.stderr)

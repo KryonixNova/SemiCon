@@ -36,6 +36,7 @@ src/
     decode.py                      # heatmap -> (x, y, confidence)
     model.py                        # assembles everything into DriftSenseLocalizer
     metrics.py                       # acc@k, AP, PR curve
+    inference.py                     # shared checkpoint-load + single-pair predict, used by predict.py and localize.py
 
 baseline_solution/         # classical ZNCC (B0) and 10x10-grid (B1) baselines,
                             # kept for comparison — see scripts/evaluate_localizer.py
@@ -44,10 +45,14 @@ scripts/
   train.py                 # train a model
   predict.py                # run inference on a reference/search image pair
   evaluate_localizer.py      # compare B0/B1/B3 side by side
-  calibrate_tie_ratio.py       # calibrate decode's tie-break threshold on validation
-  benchmark_runtime.py          # per-stage FP32/FP16 timing
-  ablation_jitter.py             # A1: does the model rely on synthetic-noise fingerprints?
-  ablation_negative.py            # A2: is confidence informative when the reference is absent?
+  validation_report.py        # spec-required threshold/runtime/failure-case report across noise x geometry conditions
+  calibrate_tie_ratio.py        # calibrate decode's tie-break threshold on validation
+  benchmark_runtime.py           # per-stage FP32/FP16 timing
+  ablation_jitter.py              # A1: does the model rely on synthetic-noise fingerprints?
+  ablation_negative.py             # A2: is confidence informative when the reference is absent?
+
+generate_dataset.py         # persisted reference/search PNG pairs + manifest.csv, spec-compliant dataset generator
+localize.py                  # single-pair or evaluator-batch inference, no source changes needed between modes
 
 checkpoints/m3_hn_r24/best.pt   # a trained checkpoint (read the caveat in §6 before trusting numbers)
 
@@ -55,10 +60,14 @@ tests/                     # pytest suite (mirrors src/localizer/ + a generator 
 
 docs/superpowers/
   specs/2026-08-08-dram-sem-reference-localization-design.md   # the design spec (architecture rationale)
+  specs/2026-08-10-hackathon-compliance-design.md                # rotation/scale robustness + submission packaging design
   plans/2026-08-08-dram-sem-localizer.md                        # the full build plan (21 tasks)
-  plans/results-m1-m3.md                                         # milestone training results
+  plans/2026-08-10-hackathon-compliance.md                       # the hackathon-compliance implementation plan
+  plans/results-m1-m3.md                                          # milestone training results
 
-generate_mxn_dram_dataset.py   # standalone script to generate labeled DRAM datasets
+generate_mxn_dram_dataset.py   # older standalone DRAM dataset generator (kept for compatibility, see §8)
+references/CITATIONS.md         # public sources for DRAM structure, SEM noise modeling, and augmentation practice
+results/                         # validation_report.py output (JSON + Markdown + failure-case PNG)
 requirements.txt
 pytest.ini
 ```
@@ -137,6 +146,17 @@ signal across multiple predictions, not a calibrated probability. It can be
 slightly negative when the decode logic's centre-tiebreak overrides raw peak
 ranking; that's expected, not an error.
 
+**Coordinate convention:** origin `(0, 0)` is the search image's top-left
+corner; `x` increases rightward, `y` increases downward — standard image-array
+convention, not math/plot convention. Predicted coordinates are always given
+in **search-image pixels**, regardless of the reference's native resolution.
+
+**Multiple matches:** if the reference pattern genuinely repeats within the
+search image (a real possibility for periodic DRAM lattices), the decoder's
+NMS + centre-tiebreak logic (`src/localizer/decode.py`) selects the
+candidate closest to the search image's centre, matching the spec's
+tie-break rule — this is inherent to the decode step, not a separate flag.
+
 ---
 
 ## 4. Training your own model
@@ -153,6 +173,9 @@ Key flags (see `python scripts/train.py --help` for the full list):
 | `--max-steps` | `40000` | the real budget; expect several hours on a single consumer GPU |
 | `--no-context` | off | trains the B2 ablation (no context head) instead of the real model |
 | `--jitter-profile` | `normal` | `normal` / `zero` / `shifted` — see `ablation_jitter.py` below |
+| `--imaging-noise-profile` | `normal` | `normal` / `harsh` — widens acquisition-noise and polygon-distortion knobs; see `src/localizer/data.py`'s `IMAGING_NOISE_PROFILES` |
+| `--geometric-profile` | `normal` | `normal` / `drift` — adds ~1-2 degree rotation and 9:1-11:1 scale-ratio jitter to reference crops; see `src/localizer/data.py`'s `GEOMETRIC_PROFILES` |
+| `--init-from` | *(none)* | warm-start weights from a different run's checkpoint, then train fresh from step 0 under this run's own schedule/profiles (for fine-tuning into a new profile after a prior run's LR schedule has already decayed) |
 | `--lambda-hn` | `0.0` | hard-negative loss weight; the *provided checkpoint* was trained with `0.5` |
 | `--hn-radius`, `--lr`, `--batch-size` | *(config default)* | override `LocalizerConfig`'s calibrated defaults if omitted |
 | `--val-every` / `--val-batches` | `1000` / `40` | validation cadence and sample count |
@@ -172,6 +195,26 @@ near the sample count.
 `--jitter-profile zero` trains against an exactly-periodic (zero aperiodic
 noise) lattice — useful only for the A1 ablation below, not for a model you
 intend to actually use, since it's a deliberately degenerate case.
+
+### Robustness profiles
+
+Two independent augmentation axes, both opt-in (default `normal` reproduces
+original behavior exactly):
+
+- **`--imaging-noise-profile harsh`** — wider acquisition-noise and
+  polygon-distortion ranges (dose, drift, astigmatism, vignette, barrel
+  distortion, charging streaks, speckle, salt-and-pepper, CD bias, corner
+  rounding).
+- **`--geometric-profile drift`** — the reference crop is scale-jittered
+  (0.9-1.1x, i.e. an effective 9:1-11:1 relationship against the nominal
+  10:1) and rotated (±2 degrees) *after* imaging, simulating a real
+  capture's calibration/stage drift. Ground truth is never affected — only
+  the reference's content is perturbed, the same way the position-jitter
+  profiles already work.
+
+Both were trained into `checkpoints/production_v2` via `--init-from`
+fine-tuning after its original schedule had already fully decayed; see
+`scripts/validation_report.py`'s output for per-condition accuracy.
 
 ---
 
@@ -258,22 +301,65 @@ genuinely informative, near 0.5 means it isn't.
 
 ---
 
-## 8. Generating your own labeled dataset
+## 8. Generating a persisted dataset
 
 ```bash
-python generate_mxn_dram_dataset.py --help
+python generate_dataset.py --split test --num-samples 30 --output-dir ./output
 ```
 
-Generates paired reference/search images with an m×n multi-region DRAM
-die/array layout and a `manifest.csv` of ground-truth coordinates — useful if
-you want a persisted dataset for external tooling, though note that
-`scripts/train.py`/`evaluate_localizer.py`/the ablation scripts don't need
-one: they generate data on-the-fly from a seed, which is why they never take
-a `--data-dir` flag.
+Writes `output/reference/*.png`, `output/search/*.png`, and
+`output/manifest.csv` (ground truth + generation metadata per pair), drawing
+from the same on-the-fly generator (`src/localizer/data.py`) that training
+itself uses — so a dataset written here is representative of what the model
+was actually trained/evaluated on. `--split` picks a canvas-disjoint seed
+range (`train`/`val`/`test`, matching `LocalizerConfig`), and
+`--imaging-noise-profile`/`--geometric-profile` control the same robustness
+axes described in §4.
+
+Note `scripts/train.py`/`evaluate_localizer.py`/the ablation scripts don't
+need a persisted dataset at all — they generate data on-the-fly from a seed,
+which is why they never take a `--data-dir` flag. This script exists for
+external tooling and for the hackathon submission's manifest requirement.
+
+An older, independently-written generator, `generate_mxn_dram_dataset.py`,
+still exists alongside this one (different manifest columns, no robustness
+profiles) — kept for backward compatibility, not the recommended entry
+point going forward.
+
+## 9. Batch localization
+
+```bash
+python localize.py --checkpoint checkpoints/production_v2/best.pt \
+    --manifest output/manifest.csv --output predictions.csv
+```
+
+Reads `reference_path`/`search_path` columns from any manifest (including
+one an evaluator supplies, or `generate_dataset.py`'s own output) and writes
+`predictions.csv` with `id, predicted_x, predicted_y, confidence,
+runtime_ms` — one row per input pair, no source-code edits needed between a
+single pair and a full batch. Single-pair mode
+(`--reference X --search Y`) matches `scripts/predict.py`'s exact CLI
+contract, kept for compatibility.
+
+## 10. Validation report
+
+```bash
+python scripts/validation_report.py \
+    --checkpoint checkpoints/production_v2/best.pt \
+    --n-per-condition 50 --out-dir results
+```
+
+Runs the model across all four `{imaging_noise_profile} x
+{geometric_profile}` combinations and writes `results/validation_report.md`
+(human-readable per-condition table: mean/median/worst Euclidean error,
+pass rate @5/4/2/1px, median runtime), `results/validation_report.json`
+(the same data, machine-readable), and `results/failure_case.png` (the
+single worst prediction across all conditions, with true/predicted centres
+marked and a root-cause note in the report).
 
 ---
 
-## 9. Further reading
+## 11. Further reading
 
 - `docs/superpowers/specs/2026-08-08-dram-sem-reference-localization-design.md`
   — the architecture rationale: why dense correlation + a context head, why
@@ -283,6 +369,12 @@ a `--data-dir` flag.
   hyperparameter, and the milestone accuracy gates.
 - `docs/superpowers/plans/results-m1-m3.md` — the actual milestone training
   results (with the scaled-down-run caveat spelled out explicitly).
+- `docs/superpowers/specs/2026-08-10-hackathon-compliance-design.md` and
+  `docs/superpowers/plans/2026-08-10-hackathon-compliance.md` — the design
+  and implementation plan behind §4's robustness profiles and §8-10's
+  submission-shaped scripts.
+- `references/CITATIONS.md` — public sources backing the DRAM structure,
+  SEM noise modeling, and scale/rotation augmentation design choices.
 - `src/localizer/decode.py` and `src/localizer/model.py`'s module
   docstrings/comments explain several non-obvious design decisions in place
   (why confidence can go negative, why sigmoid must always be applied, why
