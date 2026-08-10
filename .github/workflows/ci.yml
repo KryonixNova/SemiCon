@@ -28,7 +28,7 @@ jobs:
           pip install numpy opencv-python-headless pillow pytest matplotlib streamlit
 
       - name: Lint
-        run: flake8 src/ baseline_solution/ scripts/ --max-line-length=120 --extend-ignore=E203,W503 --exclude=__pycache__
+        run: flake8 src/ baseline_solution/ scripts/
 
       - name: Test (fast only)
         run: |
