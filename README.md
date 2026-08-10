@@ -192,6 +192,28 @@ multiple times during development; see the design/plan docs for the
 post-mortems). A healthy model keeps both stds large and `distinct_preds`
 near the sample count.
 
+**Automatic safety nets against training collapse.** Three layers, run
+automatically, no flag needed:
+1. **Non-finite input skip** — a rare edge case in the synthetic imaging
+   pipeline can occasionally emit an inf/nan pixel value under
+   `--imaging-noise-profile harsh`. If either input tensor for a batch isn't
+   fully finite, that batch is skipped *before* it ever reaches the model
+   (so it can't corrupt anything), printed as `WARNING: non-finite input at
+   step N -- skipping this batch`, and doesn't count toward
+   `--steps-this-run`/`--max-steps`.
+2. **Non-finite loss skip** — belt-and-suspenders: if the loss itself comes
+   out non-finite even from finite inputs, the optimizer step is skipped
+   (`WARNING: non-finite loss at step N -- skipping optimizer step`).
+3. **Auto-rollback on collapsed validation** — layers 1-2 only stop *weight*
+   corruption via backward()/optimizer.step(); they can't stop a forward
+   pass from updating BatchNorm's running mean/var, which happens
+   regardless. If a validation ever comes back with `nan` predictions (the
+   BatchNorm-corruption signature), training automatically reloads
+   model/optimizer/scheduler/scaler from the last known-good checkpoint and
+   continues from there (`WARNING: validation collapsed (nan predictions)
+   -- rolling back ...`) — nothing gets saved over a collapsed state, and
+   you don't need to notice and intervene manually.
+
 `--jitter-profile zero` trains against an exactly-periodic (zero aperiodic
 noise) lattice — useful only for the A1 ablation below, not for a model you
 intend to actually use, since it's a deliberately degenerate case.
@@ -212,9 +234,12 @@ original behavior exactly):
   the reference's content is perturbed, the same way the position-jitter
   profiles already work.
 
-Both were trained into `checkpoints/production_v2` via `--init-from`
-fine-tuning after its original schedule had already fully decayed; see
-`scripts/validation_report.py`'s output for per-condition accuracy.
+`checkpoints/production_v2` was fine-tuned under `--imaging-noise-profile
+harsh` alone (via `--init-from` after its own original schedule had fully
+decayed). `checkpoints/production_v3` continues from `production_v2`'s
+weights the same way, adding `--geometric-profile drift` on top, so it's
+trained under both robustness axes together — the harder, combined task.
+See `scripts/validation_report.py`'s output for per-condition accuracy.
 
 ---
 
@@ -248,6 +273,13 @@ validated result from a 4-way radius sweep (6/12/24/48), not a guess. But it
 has **not** been run at the real budget, so don't treat its absolute accuracy
 as representative of what the architecture can do — retrain with
 `--max-steps 40000` (or higher) for a production-quality model.
+
+`checkpoints/production_v2` and `checkpoints/production_v3` *are* real,
+full-budget runs: `production_v2` reached acc@50px=0.981 at step 40000
+under `--imaging-noise-profile harsh`; `production_v3` continues from those
+weights via `--init-from`, adding `--geometric-profile drift` on top (see
+§4's Robustness profiles). Prefer these over `m3_hn_r24` for anything
+beyond a quick pipeline sanity check.
 
 ---
 
