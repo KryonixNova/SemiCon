@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install flake8
+          # Install CPU-only torch for CI (requirements.txt has CUDA wheels)
+          pip install torch==2.1.0+cpu torchvision==0.16.0+cpu \
+            --index-url https://download.pytorch.org/whl/cpu
+          pip install numpy opencv-python-headless pillow pytest matplotlib streamlit
+
+      - name: Lint
+        run: flake8 src/ baseline_solution/ scripts/ --max-line-length=120 --ignore=E203,W503
+
+      - name: Test (fast only)
+        run: pytest -m "not slow" --tb=short -q
