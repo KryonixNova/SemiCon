@@ -26,6 +26,23 @@ def test_generate_mxn_canvas_shape_and_region_count():
     assert out["strip_rects"]                     # separators exist
 
 
+def test_generate_mxn_canvas_restricts_to_given_preset_names():
+    from src.presets import get_preset
+
+    allowed = {"dram_loose", "dram_wide", "dram_legacy"}
+    allowed_feature_sizes = {get_preset(n)["feature_size_nm"] for n in allowed}
+
+    rng = np.random.default_rng(0)
+    out = generate_mxn_canvas(1000, 3, 3, 120.0, rng, preset_names=sorted(allowed))
+    assert set(out["mat_feature_sizes_nm"]) <= allowed_feature_sizes
+
+
+def test_generate_mxn_canvas_preset_names_none_is_a_noop():
+    a = generate_mxn_canvas(500, 2, 2, 120.0, np.random.default_rng(3))["canvas"]
+    b = generate_mxn_canvas(500, 2, 2, 120.0, np.random.default_rng(3), preset_names=None)["canvas"]
+    assert np.array_equal(a, b)
+
+
 def test_generate_mxn_canvas_is_deterministic_for_a_seed():
     a = generate_mxn_canvas(500, 2, 2, 120.0, np.random.default_rng(7))["canvas"]
     b = generate_mxn_canvas(500, 2, 2, 120.0, np.random.default_rng(7))["canvas"]
@@ -202,6 +219,32 @@ def test_standardisation_is_applied():
         assert abs(float(s[key].std()) - 1.0) < 1e-2
 
 
+def test_generate_canvas_bundle_threads_dram_presets_to_generate_mxn_canvas():
+    from src.localizer import data as data_mod
+
+    allowed = ["dram_loose", "dram_wide", "dram_legacy"]
+    seen = []
+    real_generate_mxn_canvas = data_mod.generate_mxn_canvas
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("preset_names"))
+        return real_generate_mxn_canvas(*args, **kwargs)
+
+    data_mod.generate_mxn_canvas = spy
+    try:
+        data_mod.generate_canvas_bundle(0, dram_presets=allowed)
+    finally:
+        data_mod.generate_mxn_canvas = real_generate_mxn_canvas
+
+    assert seen == [allowed]
+
+
+def test_generate_canvas_bundle_dram_presets_none_is_a_noop():
+    a = generate_canvas_bundle(11)["search_img"]
+    b = generate_canvas_bundle(11, dram_presets=None)["search_img"]
+    assert np.array_equal(a, b)
+
+
 def test_zero_jitter_profile_produces_a_different_canvas():
     a = generate_canvas_bundle(11, jitter_profile="normal")["search_img"]
     b = generate_canvas_bundle(11, jitter_profile="zero")["search_img"]
@@ -215,6 +258,27 @@ def test_dataset_geometric_profile_changes_reference_content():
     drift_item = next(iter(LocalizerDataset(
         "val", cfg, geometric_profile="drift", shuffle_buffer_size=1)))
     assert not torch.equal(normal_item["reference_img"], drift_item["reference_img"])
+
+
+def test_dataset_threads_dram_presets_to_generate_canvas_bundle():
+    from src.localizer import data as data_mod
+
+    allowed = ["dram_loose", "dram_wide", "dram_legacy"]
+    seen = []
+    real_generate_canvas_bundle = data_mod.generate_canvas_bundle
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("dram_presets"))
+        return real_generate_canvas_bundle(*args, **kwargs)
+
+    data_mod.generate_canvas_bundle = spy
+    try:
+        cfg = LocalizerConfig(crops_per_canvas=1, val_seed_lo=0, val_seed_hi=1)
+        list(LocalizerDataset("val", cfg, dram_presets=allowed, shuffle_buffer_size=1))
+    finally:
+        data_mod.generate_canvas_bundle = real_generate_canvas_bundle
+
+    assert seen == [allowed]
 
 
 def test_dataset_yields_batchable_items():

@@ -29,6 +29,7 @@ from src.localizer.losses import focal_heatmap_loss, offset_loss
 from src.localizer.metrics import summarize
 from src.localizer.model import DriftSenseLocalizer
 from src.localizer.targets import build_targets
+from src.presets import DRAM_PRESET_NAMES
 
 
 def parse_args():
@@ -75,6 +76,13 @@ def parse_args():
                         "calibration variation between the reference and "
                         "search captures (see src/localizer/data.py's "
                         "GEOMETRIC_PROFILES).")
+    p.add_argument("--dram-presets", nargs="+", default=None,
+                   choices=DRAM_PRESET_NAMES,
+                   help="restrict every mat's DRAM preset draw to this "
+                        "subset instead of all six (dram_1x, dram_dense, "
+                        "dram_loose, dram_wide, dram_compact, dram_legacy) "
+                        "-- e.g. fine-tuning on only the presets a prior "
+                        "checkpoint tested weak on. Omit for the full pool.")
     p.add_argument("--val-every", type=int, default=1000)
     p.add_argument("--val-batches", type=int, default=40)
     p.add_argument("--num-workers", type=int, default=6)
@@ -136,6 +144,9 @@ def evaluate(model, loader, cfg, device, max_batches):
 
 def main():
     args = parse_args()
+    # Normalize once so every comparison/save/DataLoader call below sees the
+    # same canonical form regardless of the order flags were given in.
+    args.dram_presets = sorted(args.dram_presets) if args.dram_presets else None
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # LocalizerConfig()'s own field defaults are the source of truth; CLI
@@ -153,14 +164,16 @@ def main():
           f"hard_negative_radius_cells={cfg.hard_negative_radius_cells} "
           f"lambda_hard_negative={cfg.lambda_hard_negative} "
           f"imaging_noise_profile={args.imaging_noise_profile} "
-          f"geometric_profile={args.geometric_profile}")
+          f"geometric_profile={args.geometric_profile} "
+          f"dram_presets={args.dram_presets or 'all'}")
 
     model = DriftSenseLocalizer(cfg, use_context=not args.no_context).to(device)
 
     val_loader = DataLoader(
         LocalizerDataset("val", cfg, args.jitter_profile,
                          imaging_noise_profile=args.imaging_noise_profile,
-                         geometric_profile=args.geometric_profile),
+                         geometric_profile=args.geometric_profile,
+                         dram_presets=args.dram_presets),
         batch_size=cfg.batch_size, num_workers=2)
 
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr,
@@ -201,14 +214,18 @@ def main():
         # (the only profile that existed then) -- safe default for old runs.
         prev_profile = ckpt.get("imaging_noise_profile", "normal")
         prev_geom = ckpt.get("geometric_profile", "normal")
+        prev_presets = ckpt.get("dram_presets", None)
         print(f"resumed {run_dir} at step {step}/{args.max_steps} "
               f"(best acc@50px so far: {best_acc:.3f}, trained under "
               f"imaging_noise_profile={prev_profile}, "
-              f"geometric_profile={prev_geom})")
-        if prev_profile != args.imaging_noise_profile or prev_geom != args.geometric_profile:
+              f"geometric_profile={prev_geom}, "
+              f"dram_presets={prev_presets or 'all'})")
+        if (prev_profile != args.imaging_noise_profile or prev_geom != args.geometric_profile
+                or prev_presets != args.dram_presets):
             print(f"  NOTE: profile changed (imaging_noise_profile {prev_profile} -> "
                   f"{args.imaging_noise_profile}, geometric_profile {prev_geom} -> "
-                  f"{args.geometric_profile}) -- validation difficulty just changed, "
+                  f"{args.geometric_profile}, dram_presets {prev_presets or 'all'} -> "
+                  f"{args.dram_presets or 'all'}) -- validation difficulty just changed, "
                   f"so the old best_acc={best_acc:.3f} isn't a fair bar for the new "
                   f"profile(s). Resetting best-so-far to -1.0 so checkpoints save "
                   f"normally under the new conditions.")
@@ -240,7 +257,8 @@ def main():
         LocalizerDataset("train", cfg, args.jitter_profile,
                          seed_offset=train_seed_offset,
                          imaging_noise_profile=args.imaging_noise_profile,
-                         geometric_profile=args.geometric_profile),
+                         geometric_profile=args.geometric_profile,
+                         dram_presets=args.dram_presets),
         batch_size=cfg.batch_size, num_workers=args.num_workers, pin_memory=True)
 
     stop_step = args.max_steps
@@ -348,7 +366,8 @@ def main():
                     torch.save({"model": model.state_dict(), "config": cfg.as_dict(),
                                 "align_offset": align, "step": step, "metrics": m,
                                 "imaging_noise_profile": args.imaging_noise_profile,
-                                "geometric_profile": args.geometric_profile},
+                                "geometric_profile": args.geometric_profile,
+                                "dram_presets": args.dram_presets},
                                best_path)
                     print(f"  saved new best (acc@50px {best_acc:.3f})")
 
@@ -362,7 +381,8 @@ def main():
                             "config": cfg.as_dict(), "align_offset": align,
                             "step": step, "best_acc": best_acc, "metrics": m,
                             "imaging_noise_profile": args.imaging_noise_profile,
-                            "geometric_profile": args.geometric_profile},
+                            "geometric_profile": args.geometric_profile,
+                            "dram_presets": args.dram_presets},
                            last_path)
 
     print(f"stopped at step {step}/{args.max_steps}. best acc@50px so far = {best_acc:.3f}")

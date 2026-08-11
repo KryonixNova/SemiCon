@@ -14,7 +14,7 @@ import numpy as np
 
 from src.patterns.dram import generate_dram_canvas
 from src.patterns.zones import _strip_routing_texture
-from src.presets import presets_for_kind
+from src.presets import get_preset, presets_for_kind
 
 
 def fixed_count_spans(size_px: int, count: int, strip_width_nm: float):
@@ -37,6 +37,7 @@ def fixed_count_spans(size_px: int, count: int, strip_width_nm: float):
 def generate_mxn_canvas(
     size_px: int, m: int, n: int, strip_width_nm: float, rng: np.random.Generator,
     linewidth_bias_nm: float = 0.0, corner_rounding_px: float = 0.0,
+    preset_names: list[str] | None = None,
 ) -> dict:
     """Tile an m (rows) x n (cols) grid of independent DRAM mats, each with
     its own randomly chosen preset, separated by routing-strip material.
@@ -46,8 +47,14 @@ def generate_mxn_canvas(
     rounding distortion the single-architecture pipeline (src/pipeline.py)
     already supports, just applied uniformly across every region of this
     m x n grid.
+
+    `preset_names`, if given, restricts every mat's preset draw to that
+    subset of DRAM_PRESET_NAMES (e.g. training on only the presets a prior
+    checkpoint tested weak on) instead of the full six-preset pool. `None`
+    (the default) reproduces the original all-presets behavior exactly.
     """
-    presets = presets_for_kind("dram")
+    presets = ([get_preset(n) for n in preset_names] if preset_names
+               else presets_for_kind("dram"))
     canvas = _strip_routing_texture(size_px, rng)
 
     row_spans = fixed_count_spans(size_px, m, strip_width_nm)

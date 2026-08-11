@@ -139,9 +139,16 @@ def _standardize(img: np.ndarray) -> torch.Tensor:
 
 
 def generate_canvas_bundle(canvas_seed: int, jitter_profile: str = "normal",
-                            imaging_noise_profile: str = "normal") -> dict:
+                            imaging_noise_profile: str = "normal",
+                            dram_presets: list[str] | None = None) -> dict:
     """Build one fine canvas and its single Search image. Shared by every
-    crop taken from this canvas -- this is what makes crops nearly free."""
+    crop taken from this canvas -- this is what makes crops nearly free.
+
+    `dram_presets`, if given, restricts every mat's preset draw to that
+    subset of DRAM_PRESET_NAMES (see generate_mxn_canvas's `preset_names`)
+    -- e.g. training on only the presets a prior checkpoint tested weak on.
+    `None` (the default) draws from the full six-preset pool as before.
+    """
     profile = JITTER_PROFILES[jitter_profile]
     noise_profile = IMAGING_NOISE_PROFILES[imaging_noise_profile]
     noise = noise_profile["search"]
@@ -166,7 +173,8 @@ def generate_canvas_bundle(canvas_seed: int, jitter_profile: str = "normal",
         corner_rounding_px = float(rng.uniform(*pattern_noise["corner_rounding_px"]))
         zone = generate_mxn_canvas(FINE_CANVAS_SIZE_PX, m, n, strip_w, rng,
                                    linewidth_bias_nm=linewidth_bias_nm,
-                                   corner_rounding_px=corner_rounding_px)
+                                   corner_rounding_px=corner_rounding_px,
+                                   preset_names=dram_presets)
     finally:
         (dram_mod.POSITION_JITTER_NM, dram_mod.WIDTH_JITTER_FRACTION,
          dram_mod.POSITION_JITTER_DIST) = saved
@@ -265,12 +273,14 @@ class LocalizerDataset(IterableDataset):
     def __init__(self, split: str, config: LocalizerConfig,
                  jitter_profile: str = "normal", shuffle_buffer_size: int = 256,
                  seed_offset: int = 0, imaging_noise_profile: str = "normal",
-                 geometric_profile: str = "normal"):
+                 geometric_profile: str = "normal",
+                 dram_presets: list[str] | None = None):
         self.split = split
         self.config = config
         self.jitter_profile = jitter_profile
         self.imaging_noise_profile = imaging_noise_profile
         self.geometric_profile = geometric_profile
+        self.dram_presets = dram_presets
         self.shuffle_buffer_size = shuffle_buffer_size
         self.lo, self.hi = split_seed_range(split, config)
         # Lets a resumed training chunk start further into the split's canvas
@@ -289,7 +299,8 @@ class LocalizerDataset(IterableDataset):
         start = self.lo + (self.seed_offset % span if span > 0 else 0)
         for seed in range(start + wid, self.hi, nw):
             bundle = generate_canvas_bundle(seed, self.jitter_profile,
-                                            self.imaging_noise_profile)
+                                            self.imaging_noise_profile,
+                                            dram_presets=self.dram_presets)
             for k in range(self.config.crops_per_canvas):
                 s = sample_pair(bundle, seed, k, self.imaging_noise_profile,
                                 self.geometric_profile)

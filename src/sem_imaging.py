@@ -134,8 +134,16 @@ def add_shot_noise(img: np.ndarray, dose: float, rng: np.random.Generator) -> np
     """Poisson shot noise. `dose` is a proxy for electron count/dwell time --
     higher dose (slower/careful scan) means less relative noise.
     """
+    if not np.isfinite(dose) or dose <= 0:
+        dose = 1.0
     img_f = img.astype(np.float64)
     counts = np.clip(img_f / 255.0 * dose, 0, None)
+    # `rng.poisson` raises on any non-finite lambda (NaN or inf) rather than
+    # clipping it -- a single bad element kills the whole DataLoader worker,
+    # not just one sample. Last line of defense against a non-finite value
+    # reaching here from an upstream numeric edge case.
+    if not np.isfinite(counts).all():
+        counts = np.nan_to_num(counts, nan=0.0, posinf=np.finfo(np.float64).max, neginf=0.0)
     noisy_counts = rng.poisson(counts).astype(np.float64)
     noisy = noisy_counts / dose * 255.0
     return np.clip(noisy, 0, 255).astype(np.uint8)
