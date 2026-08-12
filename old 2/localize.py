@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""Predict reference-in-search centres: a single pair, or an evaluator-
+provided batch, through one shared inference path
+(src/localizer/inference.py) -- no source-code changes needed to switch
+between the two modes.
+
+Single pair (same contract as scripts/predict.py):
+    python localize.py --checkpoint checkpoints/production_v2/best.pt \
+        --reference ref.png --search search.png
+
+Batch (reads reference_path/search_path columns from any manifest,
+including one an evaluator supplies -- e.g. generate_dataset.py's output):
+    python localize.py --checkpoint checkpoints/production_v2/best.pt \
+        --manifest output/test/manifest.csv --output predictions.csv
+"""
+
+import argparse
+import csv
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import torch
+
+from src.localizer.inference import load_model, predict_pair
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--checkpoint", required=True)
+    p.add_argument("--reference", help="single-pair mode: reference image path")
+    p.add_argument("--search", help="single-pair mode: search image path")
+    p.add_argument("--manifest", help="batch mode: CSV with reference_path/search_path columns")
+    p.add_argument("--output", help="batch mode: where to write predictions.csv")
+    p.add_argument("--verbose", action="store_true")
+    args = p.parse_args()
+    if bool(args.reference) != bool(args.search):
+        p.error("--reference and --search must be given together")
+    if args.manifest and args.reference:
+        p.error("give either --reference/--search (single pair) or --manifest (batch), not both")
+    if not args.manifest and not args.reference:
+        p.error("must give either --reference/--search or --manifest")
+    if args.manifest and not args.output:
+        p.error("--manifest requires --output")
+    return args
+
+
+def main():
+    args = parse_args()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = load_model(args.checkpoint, device)
+
+    if args.manifest:
+        with open(args.manifest, newline="") as f:
+            rows = list(csv.DictReader(f))
+        out_rows = []
+        for row in rows:
+            t0 = time.perf_counter()
+            result = predict_pair(model, row["reference_path"], row["search_path"], device)
+            runtime_ms = (time.perf_counter() - t0) * 1000.0
+            out_rows.append({
+                "id": row.get("id", ""),
+                "predicted_x": f"{result['x']:.3f}",
+                "predicted_y": f"{result['y']:.3f}",
+                "confidence": f"{result['confidence']:.4f}",
+                "runtime_ms": f"{runtime_ms:.2f}",
+            })
+        out_parent = os.path.dirname(os.path.abspath(args.output))
+        os.makedirs(out_parent, exist_ok=True)
+        with open(args.output, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["id", "predicted_x", "predicted_y",
+                                                    "confidence", "runtime_ms"])
+            writer.writeheader()
+            writer.writerows(out_rows)
+        print(f"wrote {len(out_rows)} predictions to {args.output}")
+    else:
+        result = predict_pair(model, args.reference, args.search, device)
+        if args.verbose:
+            print(f"predicted_x={result['x']:.2f} predicted_y={result['y']:.2f} "
+                  f"confidence={result['confidence']:.4f}")
+        else:
+            print(f"{result['x']:.2f},{result['y']:.2f},{result['confidence']:.4f}")
+
+
+if __name__ == "__main__":
+    main()
