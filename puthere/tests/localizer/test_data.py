@@ -333,3 +333,86 @@ def test_iter_shuffle_buffer_mixes_samples_from_multiple_canvases():
     # Sharding contract preserved: the full set of seeds visited by this
     # single (unsharded, wid=0/nw=1) iterator is still every seed in range.
     assert set(seeds) == set(range(6))
+
+
+def test_dataset_skips_a_canvas_whose_generation_raises_instead_of_crashing(monkeypatch):
+    """Defense-in-depth: a rare numeric edge case in the imaging/canvas
+    pipeline (seen in practice under harsh+drift synthetic validation)
+    must not kill the whole DataLoader worker -- it should drop that one
+    canvas's samples and continue with the next seed."""
+    import src.localizer.data as data_mod
+
+    real_generate_canvas_bundle = data_mod.generate_canvas_bundle
+
+    def flaky_generate_canvas_bundle(seed, *args, **kwargs):
+        if seed == 2:
+            raise ValueError("simulated canvas-generation failure")
+        return real_generate_canvas_bundle(seed, *args, **kwargs)
+
+    monkeypatch.setattr(data_mod, "generate_canvas_bundle", flaky_generate_canvas_bundle)
+
+    cfg = LocalizerConfig(crops_per_canvas=2, val_seed_lo=0, val_seed_hi=4)
+    ds = LocalizerDataset("val", cfg, shuffle_buffer_size=1)
+    with pytest.warns(RuntimeWarning, match="skipping canvas seed=2"):
+        seeds = [int(item["canvas_seed"]) for item in ds]
+
+    # Every seed except the flaky one still produced its samples.
+    assert set(seeds) == {0, 1, 3}
+    assert seeds.count(0) == cfg.crops_per_canvas
+    assert seeds.count(1) == cfg.crops_per_canvas
+    assert seeds.count(3) == cfg.crops_per_canvas
+    assert 2 not in seeds
+
+
+def test_dataset_skips_a_crop_whose_sampling_raises_instead_of_crashing(monkeypatch):
+    """Same defense-in-depth, but for a failure in sample_pair (a single
+    crop within an otherwise-good canvas) rather than canvas generation."""
+    import src.localizer.data as data_mod
+
+    real_sample_pair = data_mod.sample_pair
+
+    def flaky_sample_pair(bundle, canvas_seed, crop_index, *args, **kwargs):
+        if canvas_seed == 1 and crop_index == 1:
+            raise ValueError("simulated crop-sampling failure")
+        return real_sample_pair(bundle, canvas_seed, crop_index, *args, **kwargs)
+
+    monkeypatch.setattr(data_mod, "sample_pair", flaky_sample_pair)
+
+    cfg = LocalizerConfig(crops_per_canvas=3, val_seed_lo=0, val_seed_hi=3)
+    ds = LocalizerDataset("val", cfg, shuffle_buffer_size=1)
+    with pytest.warns(RuntimeWarning, match="skipping crop seed=1 k=1"):
+        seeds = [int(item["canvas_seed"]) for item in ds]
+
+    # Canvas 1 lost exactly one of its three crops; canvases 0 and 2 are
+    # untouched.
+    assert seeds.count(0) == cfg.crops_per_canvas
+    assert seeds.count(1) == cfg.crops_per_canvas - 1
+    assert seeds.count(2) == cfg.crops_per_canvas
+
+
+def test_dataset_throttles_skip_warnings_past_the_limit(monkeypatch):
+    """A failure rate higher than the "rare" case this was designed for
+    must not flood a real training run's log with one warning per skip --
+    past LocalizerDataset._SKIP_WARN_LIMIT, individual warnings stop and a
+    single suppression notice fires instead."""
+    import src.localizer.data as data_mod
+
+    def always_fails(seed, *args, **kwargs):
+        raise ValueError("simulated total canvas-generation failure")
+
+    monkeypatch.setattr(data_mod, "generate_canvas_bundle", always_fails)
+
+    limit = LocalizerDataset._SKIP_WARN_LIMIT
+    cfg = LocalizerConfig(crops_per_canvas=1, val_seed_lo=0, val_seed_hi=limit + 5)
+    ds = LocalizerDataset("val", cfg, shuffle_buffer_size=1)
+
+    with pytest.warns(RuntimeWarning) as record:
+        items = list(ds)
+
+    assert items == []  # every canvas failed, nothing was ever yielded
+
+    skip_messages = [str(w.message) for w in record if "skipping canvas" in str(w.message)]
+    suppression_messages = [str(w.message) for w in record if "suppressing further" in str(w.message)]
+
+    assert len(skip_messages) == limit
+    assert len(suppression_messages) == 1

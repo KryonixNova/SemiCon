@@ -20,6 +20,7 @@ Example:
 import argparse
 import math
 import os
+import random
 import sys
 import time
 
@@ -30,11 +31,51 @@ import torch
 from torch.utils.data import DataLoader
 
 from src.localizer.config import LocalizerConfig
+from src.localizer.data import LocalizerDataset
 from src.localizer.losses import focal_heatmap_loss, offset_loss
 from src.localizer.manifest_data import ManifestDataset
 from src.localizer.metrics import summarize
 from src.localizer.model import DriftSenseLocalizer
 from src.localizer.targets import build_targets
+
+
+def _cycle(loader):
+    while True:
+        for batch in loader:
+            yield batch
+
+
+def train_batches(manifest_loader, synthetic_loader=None, rehearsal_ratio=0.5, rng=None):
+    """Yields batches from `manifest_loader` forever, or -- when
+    `synthetic_loader` is given -- from either source, drawing from
+    `synthetic_loader` with probability `rehearsal_ratio` each step.
+    `rng` is injectable for deterministic tests; defaults to the module
+    `random` instance for real runs.
+    """
+    rng = rng if rng is not None else random
+    manifest_iter = _cycle(manifest_loader)
+    synthetic_iter = _cycle(synthetic_loader) if synthetic_loader is not None else None
+    while True:
+        if synthetic_iter is not None and rng.random() < rehearsal_ratio:
+            yield next(synthetic_iter)
+        else:
+            yield next(manifest_iter)
+
+
+def should_save_best(candidate_acc: float, best_acc: float,
+                     synthetic_mean_px: float | None,
+                     rehearsal_floor_mean_px: float) -> bool:
+    """True if `candidate_acc` beats `best_acc` and, when rehearsal is
+    active (`synthetic_mean_px` is not None), the synthetic-domain val
+    mean error also clears `rehearsal_floor_mean_px`. `synthetic_mean_px
+    is None` means rehearsal is disabled -- no floor check, matching the
+    script's original single-domain selection.
+    """
+    if candidate_acc <= best_acc:
+        return False
+    if synthetic_mean_px is None:
+        return True
+    return synthetic_mean_px <= rehearsal_floor_mean_px
 
 
 def parse_args():
@@ -60,6 +101,19 @@ def parse_args():
                    help="which acc@Tpx tolerance (in px) decides checkpoint "
                         "'best' and the AP primary threshold. Also joins "
                         "--resume's best_metric-mismatch check.")
+    p.add_argument("--rehearsal-noise-profile", default=None,
+                   help="e.g. 'harsh' -- enables synthetic rehearsal batches "
+                        "mixed into the manifest fine-tune, drawn from "
+                        "src.localizer.data.LocalizerDataset. Off by default "
+                        "(pure manifest fine-tune, today's behavior).")
+    p.add_argument("--rehearsal-geometric-profile", default=None,
+                   help="e.g. 'drift' -- requires --rehearsal-noise-profile.")
+    p.add_argument("--rehearsal-ratio", type=float, default=0.5,
+                   help="fraction of steps drawing from the synthetic "
+                        "rehearsal batch instead of the manifest batch.")
+    p.add_argument("--rehearsal-floor-mean-px", type=float, default=8.0,
+                   help="max synthetic-domain val mean error (px) for a "
+                        "checkpoint to be eligible as 'best'.")
     p.add_argument("--num-workers", type=int, default=6)
     p.add_argument("--out-dir", default="./checkpoints")
     args = p.parse_args()
@@ -67,6 +121,8 @@ def parse_args():
         p.error("--resume and --init-from are mutually exclusive")
     if not args.resume and not args.init_from:
         p.error("must give --init-from (or --resume to continue this run's own checkpoint)")
+    if args.rehearsal_geometric_profile and not args.rehearsal_noise_profile:
+        p.error("--rehearsal-geometric-profile requires --rehearsal-noise-profile")
     return args
 
 
@@ -114,6 +170,25 @@ def main():
     val_loader = DataLoader(ManifestDataset(args.val_manifest),
                             batch_size=cfg.batch_size, shuffle=False,
                             num_workers=min(2, args.num_workers))
+
+    rehearsal_enabled = args.rehearsal_noise_profile is not None
+    synthetic_train_loader = None
+    synthetic_val_loader = None
+    if rehearsal_enabled:
+        geo_profile = args.rehearsal_geometric_profile or "normal"
+        synthetic_train_loader = DataLoader(
+            LocalizerDataset("train", cfg,
+                             imaging_noise_profile=args.rehearsal_noise_profile,
+                             geometric_profile=geo_profile),
+            batch_size=cfg.batch_size, num_workers=min(2, args.num_workers))
+        synthetic_val_loader = DataLoader(
+            LocalizerDataset("val", cfg,
+                             imaging_noise_profile=args.rehearsal_noise_profile,
+                             geometric_profile=geo_profile),
+            batch_size=cfg.batch_size, num_workers=min(2, args.num_workers))
+        print(f"rehearsal enabled: noise={args.rehearsal_noise_profile} "
+              f"geometric={geo_profile} ratio={args.rehearsal_ratio} "
+              f"floor={args.rehearsal_floor_mean_px}px")
 
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr,
                             weight_decay=cfg.weight_decay)
@@ -177,12 +252,7 @@ def main():
         stop_step = min(args.max_steps, step + args.steps_this_run)
     t0 = time.time()
 
-    def train_batches():
-        while True:
-            for batch in train_loader:
-                yield batch
-
-    for batch in train_batches():
+    for batch in train_batches(train_loader, synthetic_train_loader, args.rehearsal_ratio):
         if step >= stop_step:
             break
         ref = batch["reference_img"].to(device, non_blocking=True)
@@ -231,7 +301,15 @@ def main():
             print(f"  [val] std_x {m['std_px']:.2f}px  std_y {m['std_py']:.2f}px  "
                   f"distinct_preds {m['n_distinct_preds']}/{m['n']}")
 
-            collapsed = math.isnan(m["mean_error_px"]) or math.isnan(m["median_error_px"])
+            m_synthetic = None
+            if rehearsal_enabled:
+                m_synthetic = evaluate(model, synthetic_val_loader, cfg, device,
+                                       args.val_batches, args.best_metric)
+                print(f"  [rehearsal val] mean {m_synthetic['mean_error_px']:.2f}px  "
+                      f"median {m_synthetic['median_error_px']:.2f}px")
+
+            collapsed = (math.isnan(m["mean_error_px"]) or math.isnan(m["median_error_px"])
+                        or (m_synthetic is not None and math.isnan(m_synthetic["mean_error_px"])))
             if collapsed and os.path.exists(last_path):
                 print(f"  WARNING: validation collapsed -- rolling back to {last_path}")
                 recover = torch.load(last_path, weights_only=False, map_location=device)
@@ -245,10 +323,13 @@ def main():
                 print("  WARNING: validation collapsed but no prior checkpoint to roll back to")
             else:
                 best_key = f"acc@{args.best_metric}px"
-                if m[best_key] > best_acc:
+                synthetic_mean = m_synthetic["mean_error_px"] if m_synthetic else None
+                if should_save_best(m[best_key], best_acc, synthetic_mean,
+                                    args.rehearsal_floor_mean_px):
                     best_acc = m[best_key]
                     torch.save({"model": model.state_dict(), "config": cfg.as_dict(),
                                 "align_offset": align, "step": step, "metrics": m,
+                                "rehearsal_metrics": m_synthetic,
                                 "data_source": "manifest", "train_manifest": args.train_manifest,
                                 "val_manifest": args.val_manifest,
                                 "best_metric": args.best_metric},
@@ -259,6 +340,7 @@ def main():
                             "scheduler": sched.state_dict(), "scaler": scaler.state_dict(),
                             "config": cfg.as_dict(), "align_offset": align,
                             "step": step, "best_acc": best_acc, "metrics": m,
+                            "rehearsal_metrics": m_synthetic,
                             "data_source": "manifest", "train_manifest": args.train_manifest,
                             "val_manifest": args.val_manifest,
                             "best_metric": args.best_metric},

@@ -69,14 +69,28 @@ def apply_barrel_distortion(img: np.ndarray, k: float) -> np.ndarray:
         return img
     h, w = img.shape
     cy, cx = (h - 1) / 2.0, (w - 1) / 2.0
-    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    # float64, not float32: for rare sampled k/r2 combinations the
+    # intermediate magnitude can spike far above a normal in-bounds pixel
+    # offset (observed: float32 "overflow encountered in multiply" on rare
+    # harsh+drift samples) -- float64 gives ~15 orders of magnitude more
+    # headroom before the same computation would overflow.
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float64)
     nx = (xx - cx) / cx
     ny = (yy - cy) / cy
     r2 = nx ** 2 + ny ** 2
     factor = 1.0 + k * r2
     map_x = (nx * factor) * cx + cx
     map_y = (ny * factor) * cy + cy
-    return cv2.remap(img, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    # Last line of defense: even float64 has a ceiling, and cv2.remap with
+    # a non-finite map coordinate is undefined behavior that can silently
+    # corrupt the output image rather than erroring -- clamp any non-finite
+    # coordinate back into the valid pixel range before remapping, same
+    # "don't silently go wrong, clamp to something sane" philosophy as
+    # add_shot_noise's own nan_to_num guard below.
+    map_x = np.nan_to_num(map_x, nan=cx, posinf=w - 1, neginf=0.0)
+    map_y = np.nan_to_num(map_y, nan=cy, posinf=h - 1, neginf=0.0)
+    return cv2.remap(img, map_x.astype(np.float32), map_y.astype(np.float32),
+                     interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
 
 
 def add_charging_streaks(

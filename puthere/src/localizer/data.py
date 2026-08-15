@@ -13,6 +13,7 @@ near-duplicates on both sides of the boundary.
 from __future__ import annotations
 
 import random
+import warnings
 
 import cv2
 import numpy as np
@@ -294,16 +295,54 @@ class LocalizerDataset(IterableDataset):
         # shard early rather than looping back to `lo`.
         self.seed_offset = seed_offset
 
+    # Cap on individual skip warnings per worker shard before going quiet --
+    # the real failure rate under skip-and-continue is unconfirmed (the
+    # root cause it's guarding against was never pinned down), so an
+    # unexpectedly high rate must not flood a real training run's log with
+    # one line per skip.
+    _SKIP_WARN_LIMIT = 20
+
     def _raw_items(self, wid: int, nw: int):
         span = self.hi - self.lo
         start = self.lo + (self.seed_offset % span if span > 0 else 0)
+        skip_count = 0
+
+        def warn_skip(message: str) -> None:
+            nonlocal skip_count
+            skip_count += 1
+            if skip_count <= self._SKIP_WARN_LIMIT:
+                warnings.warn(message, RuntimeWarning)
+            elif skip_count == self._SKIP_WARN_LIMIT + 1:
+                warnings.warn(f"worker {wid}: {self._SKIP_WARN_LIMIT}+ canvas/crop "
+                              f"skips so far -- suppressing further individual skip "
+                              f"warnings for this worker shard", RuntimeWarning)
+
         for seed in range(start + wid, self.hi, nw):
-            bundle = generate_canvas_bundle(seed, self.jitter_profile,
-                                            self.imaging_noise_profile,
-                                            dram_presets=self.dram_presets)
+            try:
+                bundle = generate_canvas_bundle(seed, self.jitter_profile,
+                                                self.imaging_noise_profile,
+                                                dram_presets=self.dram_presets)
+            except Exception as e:
+                # A rare numeric edge case in canvas/imaging generation --
+                # some sampled parameter combination the noise pipeline
+                # doesn't handle cleanly -- crashing the whole DataLoader
+                # worker over one bad canvas is worse than losing that one
+                # canvas's samples. Skip it and move on to the next seed;
+                # every other seed in this worker's shard is unaffected and
+                # still byte-reproducible.
+                warn_skip(f"skipping canvas seed={seed} "
+                         f"({self.imaging_noise_profile}/{self.geometric_profile}): "
+                         f"{type(e).__name__}: {e}")
+                continue
             for k in range(self.config.crops_per_canvas):
-                s = sample_pair(bundle, seed, k, self.imaging_noise_profile,
-                                self.geometric_profile)
+                try:
+                    s = sample_pair(bundle, seed, k, self.imaging_noise_profile,
+                                    self.geometric_profile)
+                except Exception as e:
+                    warn_skip(f"skipping crop seed={seed} k={k} "
+                             f"({self.imaging_noise_profile}/{self.geometric_profile}): "
+                             f"{type(e).__name__}: {e}")
+                    continue
                 yield {
                     "reference_img": s["reference_img"].unsqueeze(0),
                     "search_img": s["search_img"].unsqueeze(0),
