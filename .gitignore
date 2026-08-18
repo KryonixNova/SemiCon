@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.claude/
+puthere/
+output_color_test/
+output_rgb_test/
+logs/
+*.log
