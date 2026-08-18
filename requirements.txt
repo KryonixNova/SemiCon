@@ -1,8 +1,14 @@
-numpy
-opencv-python-headless
-pillow
-pytest
-streamlit
-matplotlib
+--extra-index-url https://download.pytorch.org/whl/cu130
+
+# afb_generator/ dependencies
+opencv-python-headless==5.0.0.93
+klayout==0.30.10
+
+# puthere/ dependencies (see puthere/requirements.txt for the full pinned
+# transitive closure -- installing the direct deps below resolves it)
+numpy==2.5.1
+pillow==12.3.0
+pytest==9.1.1
+matplotlib==3.11.1
 torch==2.13.0+cu130
 torchvision==0.28.0+cu130

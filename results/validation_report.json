@@ -1,0 +1,76 @@
+{
+  "checkpoint": "puthere/checkpoints/production_v3/best.pt",
+  "device": "cuda",
+  "hardware": "NVIDIA GeForce RTX 5060 Ti",
+  "python_version": "3.12.13 | packaged by Anaconda, Inc. | (main, Jul  9 2026, 14:38:16) [GCC 14.3.0]",
+  "timing_method": "wall-clock via time.perf_counter() around the single call to model.predict(reference, search); excludes checkpoint/model loading (a one-time cost, reported separately as model_load_time_s) and PNG decode (not part of the localization algorithm itself)",
+  "model_load_time_s": 0.1477437049979926,
+  "conditions": {
+    "noise=normal_geom=normal": {
+      "n": 50,
+      "mean_error_px": 0.6381747180063243,
+      "median_error_px": 0.5655050426374517,
+      "worst_error_px": 1.5566531681982132,
+      "p90_error_px": 1.0856687410087942,
+      "runtime_ms_mean": 29.83681847988919,
+      "runtime_ms_median": 21.9388399982563,
+      "pass_rate@5.0px": 1.0,
+      "pass_rate@4.0px": 1.0,
+      "pass_rate@2.0px": 1.0,
+      "pass_rate@1.0px": 0.86
+    },
+    "noise=harsh_geom=normal": {
+      "n": 50,
+      "mean_error_px": 4.31642431711846,
+      "median_error_px": 3.593895503894971,
+      "worst_error_px": 16.51609803347261,
+      "p90_error_px": 8.701737566373605,
+      "runtime_ms_mean": 21.93847332011501,
+      "runtime_ms_median": 21.898944500208017,
+      "pass_rate@5.0px": 0.64,
+      "pass_rate@4.0px": 0.54,
+      "pass_rate@2.0px": 0.34,
+      "pass_rate@1.0px": 0.22
+    },
+    "noise=normal_geom=drift": {
+      "n": 50,
+      "mean_error_px": 0.6693911903319296,
+      "median_error_px": 0.5854058968576057,
+      "worst_error_px": 1.922383599952712,
+      "p90_error_px": 1.4458544688092823,
+      "runtime_ms_mean": 21.99604964014725,
+      "runtime_ms_median": 22.008554498825106,
+      "pass_rate@5.0px": 1.0,
+      "pass_rate@4.0px": 1.0,
+      "pass_rate@2.0px": 1.0,
+      "pass_rate@1.0px": 0.86
+    },
+    "noise=harsh_geom=drift": {
+      "n": 50,
+      "mean_error_px": 4.275605518823607,
+      "median_error_px": 3.4422793986506495,
+      "worst_error_px": 16.536170519292327,
+      "p90_error_px": 7.9491254063628105,
+      "runtime_ms_mean": 21.931615400098963,
+      "runtime_ms_median": 21.96021099916834,
+      "pass_rate@5.0px": 0.64,
+      "pass_rate@4.0px": 0.54,
+      "pass_rate@2.0px": 0.34,
+      "pass_rate@1.0px": 0.22
+    }
+  },
+  "pooled": {
+    "n_total": 200,
+    "mean_error_px": 2.47489893607008
+  },
+  "failure_case": {
+    "error_px": 16.536170519292327,
+    "confidence": 0.4812212288379669,
+    "condition": {
+      "imaging_noise_profile": "harsh",
+      "geometric_profile": "drift"
+    },
+    "image": "failure_case.png",
+    "root_cause": "Worst case (16.5px error) occurred under imaging_noise_profile=harsh, geometric_profile=drift, with model confidence=0.481. The model was still relatively confident despite the large error, suggesting a genuine structural look-alike (repeated-pattern ambiguity) rather than an easily-flagged low-confidence guess."
+  }
+}

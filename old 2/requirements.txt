@@ -1,0 +1,8 @@
+numpy
+opencv-python-headless
+pillow
+pytest
+streamlit
+matplotlib
+torch==2.13.0+cu130
+torchvision==0.28.0+cu130

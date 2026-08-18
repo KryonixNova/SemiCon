@@ -1,414 +1,139 @@
-# Drift-Sense DRAM-SEM Reference Localizer
+# KryonixNova
 
-A deep-learning replacement for classical ZNCC template matching, for the task
-of finding where a small **Reference** SEM image sits inside a larger
-**Search** SEM image at 10x zoom difference (a Reference patch, imaged at
-higher resolution, must be located within a wider Search image of the same
-sample region imaged at lower resolution).
+Drift-Sense hackathon submission: AI-powered navigation-error recovery for
+wafer inspection tools (SEMI x IESA Hackathon 2026, Applied Materials
+problem statement — see `docs/problem-statement.pdf`).
 
-**Core idea:** dense correlation between Siamese-encoded features, followed by
-a global-receptive-field context head to resolve the periodic-DRAM-lattice
-ambiguity that a purely local encoder can't — a template can look identical
-to several lattice repeats, and only wide spatial context (mat/die boundaries,
-aperiodic imaging noise) disambiguates which repeat is the true one.
+This repo consolidates two subsystems into one submission:
 
-This folder is a **self-contained package**: everything here runs
-independently, with no dependency on the original development repository.
+1. **`afb_generator/`** — AFB's procedural DRAM SEM image generator
+   (GDS-style layout + rasterization + imaging-noise pipeline).
+2. **`puthere/`** — puthere's own SEM image generator, plus its
+   deep-learned reference-localization model (training, inference, and
+   evaluation scripts).
 
----
+`afb_generator/` and `puthere/` are independent, self-contained Python
+projects, each with its own `requirements.txt`. The top-level
+`requirements.txt` is their union, for a single `pip install -r
+requirements.txt` covering everything.
 
-## 1. What's in here
+`requirements.txt` pins `torch`/`torchvision` to CUDA 13.0 builds
+(`+cu130`, via the PyTorch wheel index in the `--extra-index-url` line at
+the top of the file). **For CPU-only or a different CUDA version**, drop
+that `--extra-index-url` line and the `+cu130` suffix from the two lines
+and let plain PyPI resolve them instead — nothing in `puthere/`'s inference
+path requires CUDA specifically; `puthere/localize.py`/`predict.py` run
+fine on CPU (training does not, practically speaking).
 
-```
-src/
-  pipeline.py, sem_imaging.py, presets.py, structural_defects.py
-                           # synthetic SEM canvas generator (shared infra)
-  patterns/                # DRAM / FinFET / zone-routing pattern generators
-  localizer/                # the model itself
-    geometry.py            #   coordinate-mapping constants (scale, stride, offsets)
-    config.py               #   LocalizerConfig — every tunable in one dataclass
-    data.py                  #   on-the-fly training/val/test data generation
-    encoder.py                #  Siamese ResNet-18 (destrided, no pretrained weights)
-    correlation.py             # dense depthwise cross-correlation
-    context_head.py             # 9-layer dilated conv stack (global receptive field)
-    targets.py                   # Gaussian heatmap + sub-cell offset targets
-    losses.py                     # focal heatmap loss, offset L1, hard-negative margin
-    decode.py                      # heatmap -> (x, y, confidence)
-    model.py                        # assembles everything into DriftSenseLocalizer
-    metrics.py                       # acc@k, AP, PR curve
-    inference.py                     # shared checkpoint-load + single-pair predict, used by predict.py and localize.py
-
-baseline_solution/         # classical ZNCC (B0) and 10x10-grid (B1) baselines,
-                            # kept for comparison — see scripts/evaluate_localizer.py
-
-scripts/
-  train.py                 # train a model
-  predict.py                # run inference on a reference/search image pair
-  evaluate_localizer.py      # compare B0/B1/B3 side by side
-  validation_report.py        # spec-required threshold/runtime/failure-case report across noise x geometry conditions
-  calibrate_tie_ratio.py        # calibrate decode's tie-break threshold on validation
-  benchmark_runtime.py           # per-stage FP32/FP16 timing
-  ablation_jitter.py              # A1: does the model rely on synthetic-noise fingerprints?
-  ablation_negative.py             # A2: is confidence informative when the reference is absent?
-
-generate_dataset.py         # persisted reference/search PNG pairs + manifest.csv, spec-compliant dataset generator
-localize.py                  # single-pair or evaluator-batch inference, no source changes needed between modes
-
-checkpoints/m3_hn_r24/best.pt   # a trained checkpoint (read the caveat in §6 before trusting numbers)
-
-tests/                     # pytest suite (mirrors src/localizer/ + a generator sanity check)
-
-docs/superpowers/
-  specs/2026-08-08-dram-sem-reference-localization-design.md   # the design spec (architecture rationale)
-  specs/2026-08-10-hackathon-compliance-design.md                # rotation/scale robustness + submission packaging design
-  plans/2026-08-08-dram-sem-localizer.md                        # the full build plan (21 tasks)
-  plans/2026-08-10-hackathon-compliance.md                       # the hackathon-compliance implementation plan
-  plans/results-m1-m3.md                                          # milestone training results
-
-generate_mxn_dram_dataset.py   # older standalone DRAM dataset generator (kept for compatibility, see §8)
-references/CITATIONS.md         # public sources for DRAM structure, SEM noise modeling, and augmentation practice
-results/                         # validation_report.py output (JSON + Markdown + failure-case PNG)
-requirements.txt
-pytest.ini
-```
-
----
-
-## 2. Setup
+## Running the AFB generator
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
+cd afb_generator
 pip install -r requirements.txt
+python generate_dataset.py --num-samples 20 --split train --output-dir ./output --seed 42
 ```
 
-`requirements.txt` pins `torch==2.13.0+cu130` / `torchvision==0.28.0+cu130`.
-Those are **local version labels** — `pip` can only resolve them from
-PyTorch's own wheel index, not plain PyPI:
+See `afb_generator/README.md` for generator-specific detail (presets,
+multi-region dies, true zoom, single-training-defect mode) and how this
+copy differs from the original pipeline described in the `docs/afb-*.pdf`
+guides.
+
+## Running puthere's generator + localizer
 
 ```bash
-pip install torch==2.13.0+cu130 torchvision==0.28.0+cu130 \
-    --extra-index-url https://download.pytorch.org/whl/cu130
+cd puthere
+pip install -r requirements.txt
+python generate_dataset.py --num-samples 20 --split test --output-dir ./output --seed 200000
+python localize.py --manifest ./output/manifest.csv --output ./predictions.csv
 ```
 
-If you're on a different CUDA version (or CPU-only), install whatever
-`torch`/`torchvision` build matches your machine instead — nothing in this
-code is tied to that specific build, it's just what was validated during
-development. CPU-only works fine for `predict.py` on a single image pair;
-training is impractically slow without a GPU.
+(`--split test` requires a seed in `[200000, 200500)` — `production_v3` was
+trained on canvas seeds `[0, 100000)`, so this uses the held-out test split
+rather than training data.)
 
-Verify the install:
+Two checkpoints ship in `puthere/checkpoints/`: **`production_v3`** is this
+submission's default (consistently accurate across every noise/geometry
+condition tested, pooled mean error 2.47px) and **`production_v5`** is kept
+for reference only — a real-data specialist fine-tuned on real AFB-rendered
+imagery, with a documented accuracy/robustness trade-off against
+`production_v3`. See `puthere/README.md` for full detail on everything
+above — architecture, the full `production_v3`/`production_v5` results
+table and why v3 is the default, training lineage, evaluation methodology,
+and reproduction steps.
+
+See `puthere/scripts/train.py` and `puthere/scripts/validation_report.py`
+for training and spec-compliance validation respectively.
+
+## Running the tests
+
+Each subsystem has its own pytest suite, run independently:
 
 ```bash
-python -m pytest tests/ -q -m "not slow"
+cd afb_generator && python -m pytest tests/ -v      # 44 tests
+cd puthere && python -m pytest tests/ -v -m "not slow"   # 121 passed, 15 deselected
 ```
 
-Should print `96 passed, 2 deselected` (the two `slow`-marked tests run a
-real receptive-field measurement and a few live optimizer steps — include
-them with `-m slow` or drop `-m "not slow"` entirely if you want the full
-suite; expect ~40s instead of ~35s).
+`puthere/tests/localizer/test_model.py::test_predictions_lie_inside_the_valid_range`
+is a known pre-existing flaky test (unseeded random weight init in the test
+itself, not a regression) — it fails intermittently under a full-suite run
+but passes when re-run in isolation; this reproduces identically in the
+original, untouched `puthere` development repository, so it's documented
+here rather than treated as a bug to fix.
 
-All commands below assume you're running from this folder's root, with the
-venv active.
+## Deliverables
 
----
+- `solution_presentation.pptx` / `.pdf` — the mandatory presentation
+  (Component 1 of the problem statement).
+- `results/` — a sample generated dataset, predictions, and a
+  spec-validation report against `puthere/checkpoints/production_v3`
+  (Component 2's expected deliverables).
+- `docs/` — the official problem statement plus both source projects'
+  technical guides. (Note: AFB's guides describe the full original
+  pipeline including its SuperPoint+LightGlue matcher, which is not
+  included in `afb_generator/` — see Design notes below.)
 
-## 3. Quick start: predict on your own images
+## Design notes
 
-```bash
-python scripts/predict.py \
-    --checkpoint checkpoints/m3_hn_r24/best.pt \
-    --reference path/to/reference.png \
-    --search path/to/search.png \
-    --verbose
-```
+- AFB's own SuperPoint+LightGlue matcher and RANSAC localizer are
+  intentionally not included — puthere's deep-learned model is the one
+  localization approach in this submission, so `afb_generator/` only
+  carries generation code and has no torch/lightglue dependency.
+- `puthere/`'s generator and localizer ship together rather than split
+  into separate folders: puthere's training-time data loader
+  (`src/localizer/data.py`) generates samples on the fly by calling
+  directly into the same `src/patterns/`/`src/presets.py` code its
+  standalone `generate_dataset.py` CLI uses — splitting them would just
+  duplicate those files.
 
-Output:
-```
-predicted_x=484.77 predicted_y=898.32 confidence=0.0745
-```
+## Citations
 
-(`--verbose` prints labeled fields; omit it for machine-readable
-`x,y,confidence` on one line.)
+Public sources backing this project's synthetic-data and noise-modeling
+design choices, per the hackathon spec's requirement to justify structures
+and augmentations against credible sources:
 
-**Input requirements**, enforced by the script (it raises a clear error if
-violated rather than failing deep inside the model):
-- **Search image** must be exactly `1000x1000` px, grayscale.
-- **Reference image** is auto-resized to `100x100` px — this assumes it's
-  already at the correct physical scale (the Reference is imaged at 10x the
-  Search image's resolution over the same real-world area). A reference at a
-  genuinely different physical scale will be silently misinterpreted; there's
-  no way for the script to detect that from pixel data alone.
+### DRAM 1T-1C cell structure (word lines, bit lines, capacitor storage)
 
-Confidence is a **peak margin**, not a raw score (the classical ZNCC baseline
-scored a misleadingly high 0.9+ even when wrong ~35% of the time, so absolute
-score alone doesn't separate right from wrong here) — treat it as a ranking
-signal across multiple predictions, not a calibrated probability. It can be
-slightly negative when the decode logic's centre-tiebreak overrides raw peak
-ranking; that's expected, not an error.
+- imec, "DRAM peripheral transistors technology platform."
+  <https://www.imec-int.com/en/articles/technology-platform-thermally-stable-dram-peripheral-transistors>
+- SemiAnalysis, "The Memory Wall: Past, Present, and Future of DRAM."
+  <https://newsletter.semianalysis.com/p/the-memory-wall>
 
-**Coordinate convention:** origin `(0, 0)` is the search image's top-left
-corner; `x` increases rightward, `y` increases downward — standard image-array
-convention, not math/plot convention. Predicted coordinates are always given
-in **search-image pixels**, regardless of the reference's native resolution.
+### SEM imaging noise and degradation modeling
 
-**Multiple matches:** if the reference pattern genuinely repeats within the
-search image (a real possibility for periodic DRAM lattices), the decoder's
-NMS + centre-tiebreak logic (`src/localizer/decode.py`) selects the
-candidate closest to the search image's centre, matching the spec's
-tie-break rule — this is inherent to the decode step, not a separate flag.
+- "Correction of Scanning Electron Microscope Imaging Artifacts in a Novel
+  Digital Image Correlation Framework," *Experimental Mechanics* (Springer).
+  <https://pmc.ncbi.nlm.nih.gov/articles/PMC6541586/>
+- "Scanning Electron Microscope Image Signal-to-Noise Ratio Monitoring for
+  Micro-Nanomanipulation." <https://hal.science/hal-01051309/document>
 
----
+### Data augmentation for scale/rotation robustness in matching tasks
 
-## 4. Training your own model
+- "An Efficient Deep Template Matching and In-Plane Pose Estimation Method
+  via Template-Aware Dynamic Convolution," arXiv.
+  <https://arxiv.org/html/2510.01678>
+- "Who Handles Orientation? Investigating Invariance in Feature Matching,"
+  arXiv. <https://arxiv.org/html/2604.11809v1>
 
-```bash
-python scripts/train.py --run-name my_run --max-steps 40000
-```
-
-Key flags (see `python scripts/train.py --help` for the full list):
-
-| Flag | Default | Notes |
-|---|---|---|
-| `--run-name` | *required* | checkpoints land in `checkpoints/<run-name>/best.pt` |
-| `--max-steps` | `40000` | the real budget; expect several hours on a single consumer GPU |
-| `--no-context` | off | trains the B2 ablation (no context head) instead of the real model |
-| `--jitter-profile` | `normal` | `normal` / `zero` / `shifted` — see `ablation_jitter.py` below |
-| `--imaging-noise-profile` | `normal` | `normal` / `harsh` — widens acquisition-noise and polygon-distortion knobs; see `src/localizer/data.py`'s `IMAGING_NOISE_PROFILES` |
-| `--geometric-profile` | `normal` | `normal` / `drift` — adds ~1-2 degree rotation and 9:1-11:1 scale-ratio jitter to reference crops; see `src/localizer/data.py`'s `GEOMETRIC_PROFILES` |
-| `--init-from` | *(none)* | warm-start weights from a different run's checkpoint, then train fresh from step 0 under this run's own schedule/profiles (for fine-tuning into a new profile after a prior run's LR schedule has already decayed) |
-| `--lambda-hn` | `0.0` | hard-negative loss weight; the *provided checkpoint* was trained with `0.5` |
-| `--hn-radius`, `--lr`, `--batch-size` | *(config default)* | override `LocalizerConfig`'s calibrated defaults if omitted |
-| `--val-every` / `--val-batches` | `1000` / `40` | validation cadence and sample count |
-
-Every validation step prints two lines:
-```
-[val] acc@50px 0.860  acc@5px 0.840  median 1.0px  AP 0.846
-[val] std_x 258.40px  std_y 246.12px  distinct_preds 64/64
-```
-The second line is a **collapse monitor** — if `std_x`/`std_y` shrink toward
-0 or `distinct_preds` shrinks toward 1, the model is predicting the same
-point regardless of input (a real failure mode this architecture hit
-multiple times during development; see the design/plan docs for the
-post-mortems). A healthy model keeps both stds large and `distinct_preds`
-near the sample count.
-
-**Automatic safety nets against training collapse.** Three layers, run
-automatically, no flag needed:
-1. **Non-finite input skip** — a rare edge case in the synthetic imaging
-   pipeline can occasionally emit an inf/nan pixel value under
-   `--imaging-noise-profile harsh`. If either input tensor for a batch isn't
-   fully finite, that batch is skipped *before* it ever reaches the model
-   (so it can't corrupt anything), printed as `WARNING: non-finite input at
-   step N -- skipping this batch`, and doesn't count toward
-   `--steps-this-run`/`--max-steps`.
-2. **Non-finite loss skip** — belt-and-suspenders: if the loss itself comes
-   out non-finite even from finite inputs, the optimizer step is skipped
-   (`WARNING: non-finite loss at step N -- skipping optimizer step`).
-3. **Auto-rollback on collapsed validation** — layers 1-2 only stop *weight*
-   corruption via backward()/optimizer.step(); they can't stop a forward
-   pass from updating BatchNorm's running mean/var, which happens
-   regardless. If a validation ever comes back with `nan` predictions (the
-   BatchNorm-corruption signature), training automatically reloads
-   model/optimizer/scheduler/scaler from the last known-good checkpoint and
-   continues from there (`WARNING: validation collapsed (nan predictions)
-   -- rolling back ...`) — nothing gets saved over a collapsed state, and
-   you don't need to notice and intervene manually.
-
-`--jitter-profile zero` trains against an exactly-periodic (zero aperiodic
-noise) lattice — useful only for the A1 ablation below, not for a model you
-intend to actually use, since it's a deliberately degenerate case.
-
-### Robustness profiles
-
-Two independent augmentation axes, both opt-in (default `normal` reproduces
-original behavior exactly):
-
-- **`--imaging-noise-profile harsh`** — wider acquisition-noise and
-  polygon-distortion ranges (dose, drift, astigmatism, vignette, barrel
-  distortion, charging streaks, speckle, salt-and-pepper, CD bias, corner
-  rounding).
-- **`--geometric-profile drift`** — the reference crop is scale-jittered
-  (0.9-1.1x, i.e. an effective 9:1-11:1 relationship against the nominal
-  10:1) and rotated (±2 degrees) *after* imaging, simulating a real
-  capture's calibration/stage drift. Ground truth is never affected — only
-  the reference's content is perturbed, the same way the position-jitter
-  profiles already work.
-
-`checkpoints/production_v2` was fine-tuned under `--imaging-noise-profile
-harsh` alone (via `--init-from` after its own original schedule had fully
-decayed). `checkpoints/production_v3` continues from `production_v2`'s
-weights the same way, adding `--geometric-profile drift` on top, so it's
-trained under both robustness axes together — the harder, combined task.
-See `scripts/validation_report.py`'s output for per-condition accuracy.
-
----
-
-## 5. Evaluating and comparing against baselines
-
-```bash
-python scripts/evaluate_localizer.py \
-    --checkpoint checkpoints/m3_hn_r24/best.pt --n-samples 500
-```
-
-Runs B0 (classical ZNCC), B1 (10x10 grid search), and B3 (this model) on the
-same canvas-disjoint test-split samples, writes `eval_results/comparison.json`,
-and prints an accuracy table. Pass `--no-context` to evaluate a B2
-(no-context-head) checkpoint instead of B3.
-
----
-
-## 6. About the provided checkpoint — read before trusting its numbers
-
-`checkpoints/m3_hn_r24/best.pt` was trained for **1000 steps**, not the
-`40000`-step production budget above. This was a deliberate choice during
-development: validate that the whole pipeline (data generation, loss,
-training loop, decoding) works end-to-end and that loss decreases sensibly,
-without spending hours of GPU time per experiment.
-
-At 1000 steps it already reaches **acc@50px = 0.86–0.88** on held-out test
-samples (see `docs/superpowers/plans/results-m1-m3.md` for the full
-milestone table) — good enough to demo and sanity-check the pipeline, and
-`hard_negative_radius_cells=24` (baked into this checkpoint) is a real,
-validated result from a 4-way radius sweep (6/12/24/48), not a guess. But it
-has **not** been run at the real budget, so don't treat its absolute accuracy
-as representative of what the architecture can do — retrain with
-`--max-steps 40000` (or higher) for a production-quality model.
-
-`checkpoints/production_v2` and `checkpoints/production_v3` *are* real,
-full-budget runs: `production_v2` reached acc@50px=0.981 at step 40000
-under `--imaging-noise-profile harsh`; `production_v3` continues from those
-weights via `--init-from`, adding `--geometric-profile drift` on top (see
-§4's Robustness profiles). Prefer these over `m3_hn_r24` for anything
-beyond a quick pipeline sanity check.
-
----
-
-## 7. Calibration and diagnostic scripts
-
-**`calibrate_tie_ratio.py`** — `decode()`'s tie-break threshold
-(`peak_tie_ratio`) is calibrated on validation data, never picked
-arbitrarily. Re-run this after retraining if you want a freshly-calibrated
-threshold instead of the shipped default (`0.98`):
-```bash
-python scripts/calibrate_tie_ratio.py --checkpoint checkpoints/m3_hn_r24/best.pt
-```
-Prints a sensitivity curve over τ ∈ [0.80, 1.00] and the selected value —
-update `LocalizerConfig.peak_tie_ratio` in `src/localizer/config.py` by hand
-if you want to bake in a new value for future runs.
-
-**`benchmark_runtime.py`** — per-stage FP32/FP16 timing (encoder, correlation,
-context head, decode), CUDA-event-measured, compared against the classical
-ZNCC baseline:
-```bash
-python scripts/benchmark_runtime.py
-```
-
-**`ablation_jitter.py`** (A1) — tests whether the model depends on
-generator-specific noise fingerprints rather than genuine aperiodicity. Needs
-a second checkpoint trained with `--jitter-profile zero` to fill in the
-`zero`-trained row:
-```bash
-python scripts/train.py --run-name zero_jitter_model --jitter-profile zero --max-steps 40000
-python scripts/ablation_jitter.py \
-    --checkpoint checkpoints/m3_hn_r24/best.pt \
-    --checkpoint-zero checkpoints/zero_jitter_model/best.pt
-```
-Prints a 2x3 train-profile x test-profile accuracy matrix. Read the script's
-own docstring for how to interpret the two "drop" figures — a large
-normal→zero drop is expected (zero-jitter data is genuinely
-information-theoretically degenerate), a large normal→shifted drop would be
-the actual red flag (would mean the model overfit one specific noise
-distribution instead of aperiodicity in general).
-
-**`ablation_negative.py`** (A2, diagnostic — gates nothing) — pairs each
-Search image with a Reference from a genuinely unrelated canvas, measuring
-whether `confidence` is a real signal for "this reference isn't actually
-here" (which the classical ZNCC baseline is bad at — it scored misleadingly
-high even ~35% of the time it was wrong):
-```bash
-python scripts/ablation_negative.py --checkpoint checkpoints/m3_hn_r24/best.pt
-```
-Prints an AUROC; well above 0.5 means the margin-based confidence is
-genuinely informative, near 0.5 means it isn't.
-
----
-
-## 8. Generating a persisted dataset
-
-```bash
-python generate_dataset.py --split test --num-samples 30 --output-dir ./output
-```
-
-Writes `output/reference/*.png`, `output/search/*.png`, and
-`output/manifest.csv` (ground truth + generation metadata per pair), drawing
-from the same on-the-fly generator (`src/localizer/data.py`) that training
-itself uses — so a dataset written here is representative of what the model
-was actually trained/evaluated on. `--split` picks a canvas-disjoint seed
-range (`train`/`val`/`test`, matching `LocalizerConfig`), and
-`--imaging-noise-profile`/`--geometric-profile` control the same robustness
-axes described in §4.
-
-Note `scripts/train.py`/`evaluate_localizer.py`/the ablation scripts don't
-need a persisted dataset at all — they generate data on-the-fly from a seed,
-which is why they never take a `--data-dir` flag. This script exists for
-external tooling and for the hackathon submission's manifest requirement.
-
-An older, independently-written generator, `generate_mxn_dram_dataset.py`,
-still exists alongside this one (different manifest columns, no robustness
-profiles) — kept for backward compatibility, not the recommended entry
-point going forward.
-
-## 9. Batch localization
-
-```bash
-python localize.py --checkpoint checkpoints/production_v2/best.pt \
-    --manifest output/manifest.csv --output predictions.csv
-```
-
-Reads `reference_path`/`search_path` columns from any manifest (including
-one an evaluator supplies, or `generate_dataset.py`'s own output) and writes
-`predictions.csv` with `id, predicted_x, predicted_y, confidence,
-runtime_ms` — one row per input pair, no source-code edits needed between a
-single pair and a full batch. Single-pair mode
-(`--reference X --search Y`) matches `scripts/predict.py`'s exact CLI
-contract, kept for compatibility.
-
-## 10. Validation report
-
-```bash
-python scripts/validation_report.py \
-    --checkpoint checkpoints/production_v2/best.pt \
-    --n-per-condition 50 --out-dir results
-```
-
-Runs the model across all four `{imaging_noise_profile} x
-{geometric_profile}` combinations and writes `results/validation_report.md`
-(human-readable per-condition table: mean/median/worst Euclidean error,
-pass rate @5/4/2/1px, median runtime), `results/validation_report.json`
-(the same data, machine-readable), and `results/failure_case.png` (the
-single worst prediction across all conditions, with true/predicted centres
-marked and a root-cause note in the report).
-
----
-
-## 11. Further reading
-
-- `docs/superpowers/specs/2026-08-08-dram-sem-reference-localization-design.md`
-  — the architecture rationale: why dense correlation + a context head, why
-  a Gaussian heatmap target, why the loss is structured the way it is.
-- `docs/superpowers/plans/2026-08-08-dram-sem-localizer.md` — the full build
-  plan, including exact coordinate-mapping math, every configurable
-  hyperparameter, and the milestone accuracy gates.
-- `docs/superpowers/plans/results-m1-m3.md` — the actual milestone training
-  results (with the scaled-down-run caveat spelled out explicitly).
-- `docs/superpowers/specs/2026-08-10-hackathon-compliance-design.md` and
-  `docs/superpowers/plans/2026-08-10-hackathon-compliance.md` — the design
-  and implementation plan behind §4's robustness profiles and §8-10's
-  submission-shaped scripts.
-- `references/CITATIONS.md` — public sources backing the DRAM structure,
-  SEM noise modeling, and scale/rotation augmentation design choices.
-- `src/localizer/decode.py` and `src/localizer/model.py`'s module
-  docstrings/comments explain several non-obvious design decisions in place
-  (why confidence can go negative, why sigmoid must always be applied, why
-  the centre-tiebreak never appears in any loss term) — worth reading before
-  modifying either file.
+Full citation-to-code mapping: see `puthere`'s own development history
+(`references/CITATIONS.md` in the original `puthere` repo) for which
+specific parameter/function each source backs.
