@@ -105,8 +105,8 @@ def main():
                 ref_hires = cv2.resize(s["reference_img_u8"],
                                        (REFERENCE_HIRES_PX, REFERENCE_HIRES_PX),
                                        interpolation=cv2.INTER_CUBIC)
-                cv2.imwrite(ref_path, ref_hires)
-                cv2.imwrite(search_path, bundle["search_img"])
+                cv2.imwrite(ref_path, cv2.applyColorMap(ref_hires, cv2.COLORMAP_INFERNO))
+                cv2.imwrite(search_path, cv2.applyColorMap(bundle["search_img"], cv2.COLORMAP_INFERNO))
 
                 writer.writerow({
                     "id": i, "architecture": "dram",
