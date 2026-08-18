@@ -93,8 +93,8 @@ def main():
 
                 ref_path = os.path.join(ref_dir, f"{i:05d}.png")
                 search_path = os.path.join(search_dir, f"{i:05d}.png")
-                cv2.imwrite(ref_path, s["reference_img_u8"])
-                cv2.imwrite(search_path, bundle["search_img"])
+                cv2.imwrite(ref_path, cv2.cvtColor(s["reference_img_u8"], cv2.COLOR_GRAY2BGR))
+                cv2.imwrite(search_path, cv2.cvtColor(bundle["search_img"], cv2.COLOR_GRAY2BGR))
 
                 writer.writerow({
                     "id": i, "reference_path": ref_path, "search_path": search_path,

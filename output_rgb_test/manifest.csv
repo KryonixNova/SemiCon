@@ -1,0 +1,4 @@
+id,reference_path,search_path,gt_x,gt_y,canvas_seed,crop_index,jitter_profile,imaging_noise_profile,geometric_profile,scale_ratio,rotation_deg
+0,./output_rgb_test\reference\00000.png,./output_rgb_test\search\00000.png,338.3,537.1,200000,0,normal,normal,normal,1.0,0.0
+1,./output_rgb_test\reference\00001.png,./output_rgb_test\search\00001.png,473.5,874.5,200001,0,normal,normal,normal,1.0,0.0
+2,./output_rgb_test\reference\00002.png,./output_rgb_test\search\00002.png,416.3,741.9,200002,0,normal,normal,normal,1.0,0.0

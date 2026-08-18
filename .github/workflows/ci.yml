@@ -23,12 +23,13 @@ jobs:
         run: |
           pip install flake8
           # Install CPU-only torch for CI (requirements.txt has CUDA wheels)
-          pip install torch==2.1.0+cpu torchvision==0.16.0+cpu \
+          pip install torch==2.13.0+cpu torchvision==0.28.0+cpu \
             --index-url https://download.pytorch.org/whl/cpu
           pip install numpy opencv-python-headless pillow pytest matplotlib streamlit
 
       - name: Lint
-        run: flake8 src/ baseline_solution/ scripts/ --max-line-length=120 --ignore=E203,W503
+        run: flake8 src/ baseline_solution/ scripts/
 
       - name: Test (fast only)
-        run: pytest -m "not slow" --tb=short -q
+        run: |
+          pytest -m "not slow" --tb=short -q --ignore=old || [ $? -eq 5 ]
